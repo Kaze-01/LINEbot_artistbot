@@ -1,8 +1,12 @@
+process.on('unhandledRejection', console.dir);
+
 // -----------------------------------------------
 // モジュールインポート
 // require : npmで読み込んだモジュールに対しJSで利用できるようにするメソッド
 const server = require("express")();
 const line = require("@line/bot-sdk"); // Messaging APIのSDKをインポート
+const dialogflow = require("dialogflow");
+
 // -----------------------------------------------
 // パラメータ設定
 const line_config = {
@@ -11,14 +15,23 @@ const line_config = {
   // 環境変数からChannel Secretをセット
   channelSecret: process.env.LINE_CHANNEL_SECRET
 };
+
 // ------------------------------------------------
 // Webサーバー設定
 // listen : サーバーは待受状態となりクライアントからリクエストがあればそれを受け取り処理する
 server.listen(process.env.PORT || 3000);
 
-// ------------------------------------------------
 // APIコールのためのクライアントインスタンスを作成
 const bot = new line.Client(line_config);
+
+// Dialogflowのクライアントインスタンスを作成
+const session_client = new dialogflow.SessionsClient({
+  project_id: process.env.GOOGLE_PROJECT_ID,
+  credentials: {
+    client_email: process.env.GOOGLE_CLIENT_EMAIL,
+    private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n")
+  }
+});
 
 // ------------------------------------------------
 // ルータ設定
@@ -32,21 +45,37 @@ server.post("/bot/webhook", line.middleware(line_config), (req, res, next) => {
     // イベントオブジェクトを順次処理
     req.body.events.forEach((event) => {
       // この処理の対象をイベントタイプがメッセージで，かつ，テキストタイプだった場合に限定
-      if (event.type == "message" && event.message.type == "text"){
-        // ユーザからのテキストメッセージが「こんにちは」だった場合のみ反応
-        if (event.message.text == "こんにちは"){
-          // replyMessage()で返信し，そのプロミスをevents_processedに追加
-          events_processed.push(bot.replyMessage(event.replyToken, {
-            type: "text",
-            text:"これはこれは"
-          }));
-        }
+      if(event.type == "message" && event.message.type == "text"){
+        events_processed.push(
+          session_client.detectIntent({
+            session: session_client.sessionPath(process.env.GOOGLE_PROJECT_ID, event.source.userId),
+            queryInput: {
+              text: {
+                text: event.message.text,
+                languageCode: "ja",
+              }
+            }
+          }).then((responses) => {
+              if(responses[0].queryResult && responses[0].queryResult.action == "handle_artist_order"){
+                let message_text
+                if(responses[0].queryResult.parameters.fields.artist.stringValue){
+                  message_text = `${responses[0].queryResult.parameters.fields.artist.stringValue}ね！おすすめ曲は...`;
+                } else {
+                  message_text = `聞きたいアーティストは？`;
+                }
+
+                return bot.replyMessage(event.replyToken, {
+                  type:"text",
+                  text: message_text
+                });
+            }
+          })
+        );
       }
     });
-
+    
     // 全てのイベント処理が終了したら何個のイベントが処理されたか出力
-    Promise.all(events_processed).then(
-      (response) => {
+    Promise.all(events_processed).then((response) => {
         console.log(`${response.length} event(s) processed.`);
       }
     );
